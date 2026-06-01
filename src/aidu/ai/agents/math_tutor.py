@@ -54,7 +54,9 @@ class MathTutor(LLMAgent):
 
     def fc_route_symbolic_solver(self, context: Context, problem: str) -> tuple[Message, Context]:
         """
-        Use this function when symbolic mathematics is required.
+        Use this function when symbolic mathematics is required. Use SymPy syntax for the problem statement,
+        like "diff(4*x**3, x)" for differentiation, "solve(x**2 - 4, x)" for solving equations,
+        or "integrate(sin(x), x)" for integration.
 
         Examples:
         - derivatives
@@ -63,9 +65,9 @@ class MathTutor(LLMAgent):
         - simplification
         - symbolic manipulation
 
-        Parameters:
-            problem:
-                Mathematical problem expressed in SymPy syntax. like "diff(4*x**3, x)" for differentiation, "solve(x**2 - 4, x)" for solving equations, or "integrate(sin(x), x)" for integration.
+        Args:
+            problem (str): Mathematical problem expressed in SymPy syntax, e.g. "diff(4*x**3, x)".
+
 
         Alerts:
         - **Ensure** the problem parameter is in valid SymPy syntax to avoid parsing errors.

@@ -3,7 +3,7 @@
 UV=uv
 FIND=find
 MAKE=make
-SRC=aidu.ai.llm
+SRC=src.aidu.ai.llm
 APP=app/
 
 .PHONY: help install clean wipe serve run smoke test curl web.build lint format check-format pre-commit-install pre-commit-run

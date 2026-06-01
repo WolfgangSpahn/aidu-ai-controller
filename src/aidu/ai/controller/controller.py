@@ -8,13 +8,14 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.rule import Rule
 
-from aidu.ai.core.agent_result import AgentResult
+from aidu.ai.core.processor_result import ProcessorResult
 from aidu.ai.core.artifacts import Artifact, SymbolicArtifact
 from aidu.ai.core.recommendation import Recommendation
 from aidu.ai.core.context import Context
 from aidu.ai.controller.processor import Processor
 
 logger = logging.getLogger(__name__)
+# logger.setLevel(logging.DEBUG)
 # ------------------------------------------------------------------------------
 # Events
 # ------------------------------------------------------------------------------
@@ -24,7 +25,7 @@ class Event(BaseModel):
     pass
 
 
-class AgentRequested(Event):
+class ProcessorRequested(Event):
     target: str
 
     artifact: Artifact
@@ -49,7 +50,7 @@ class Controller:
     """
 
     def __init__(self, context: Context = None):
-        self.context = context or Context()
+        self.context = context
 
     def select(self, rs):
 
@@ -58,32 +59,30 @@ class Controller:
 
         return max(rs, key=lambda r: r.utility)
 
-    def build_agent_context(self, agent) -> Context:
+    def build_agent_context(self, processor: Processor) -> Context:
 
         ctx = self.context.model_copy(deep=True)
 
-        system_message = {
-            "role": "system",
-            "content": agent.render_system_prompt(),
-        }
+        system_messages = processor.agent.build_system_prompt()
+
+        # `build_system_prompt` returns a list of message dicts; merge
+        # them into the trace instead of nesting them under a single
+        # system message's `content` field (which breaks provider APIs).
+        if isinstance(system_messages, dict):
+            system_messages = [system_messages]
 
         ctx.trace.messages = [
-            system_message,
+            *system_messages,
             *ctx.trace.messages,
         ]
 
         return ctx
 
-    def run(self, agents: dict, start: str, artifact: Artifact, max_steps: int = 10, console: Console = None):
+    def run(self, processors: dict, start: str, artifact: Artifact, max_steps: int = 10, console: Console = None):
 
         mailbox = deque()
 
-        mailbox.append(
-            AgentRequested(
-                target=start,
-                artifact=artifact,
-            )
-        )
+        mailbox.append(ProcessorRequested(target=start, artifact=artifact))
 
         steps = 0
 
@@ -96,18 +95,15 @@ class Controller:
 
             if isinstance(event, Stop):
                 logger.debug("\n[green]Controller stopped[/green]")
-
                 break
 
-            if isinstance(event, AgentRequested):
-                processor = agents[event.target]
+            if isinstance(event, ProcessorRequested):
+                processor = processors[event.target]
 
                 # ------------------------------------------------------
                 # Execute processor
                 # ------------------------------------------------------
-                agent_context = self.build_agent_context(
-                    processor,
-                )
+                agent_context = self.build_agent_context(processor)
 
                 res = processor.run(
                     event.artifact,
@@ -125,7 +121,7 @@ class Controller:
                 if res.artifacts:
                     artifact = res.artifacts[0]
 
-                # yield the previous artifact and the AgentResult so callers
+                # yield the previous artifact and the ProcessorResult so callers
                 # can compute and pretty-print diffs between before/after.
 
                 # ------------------------------------------------------
@@ -148,11 +144,22 @@ class Controller:
                     continue
 
                 mailbox.append(
-                    AgentRequested(
+                    ProcessorRequested(
                         target=r.target,
                         artifact=artifact,
                     )
                 )
+
+                # ---------------------------------------------------------------
+                # Update self.context
+                # ---------------------------------------------------------------
+
+                # context.trace
+
+                self.context.trace.message.append({'role':'','content':''})
+                # context.state
+
+                # context.control
 
         # Return final artifact via StopIteration.value when iterated to completion.
         return artifact
@@ -171,7 +178,7 @@ class DummyProcessor:
     def run(
         self,
         artifact: SymbolicArtifact,
-    ) -> AgentResult:
+    ) -> ProcessorResult:
 
         value = artifact.content + 1
 
@@ -180,7 +187,7 @@ class DummyProcessor:
             content=value,
         )
 
-        return AgentResult(
+        return ProcessorResult(
             artifacts=[out],
             recommendations=[
                 Recommendation(
@@ -199,7 +206,7 @@ class DummyProcessor:
 
 def _smoke_test_1():
 
-    result = AgentResult(
+    result = ProcessorResult(
         artifacts=[],
         recommendations=[
             Recommendation(
@@ -241,7 +248,7 @@ def _smoke_test_2(console: Console):
     )
 
     artifact = controller.run(
-        agents=processors,
+        processors=processors,
         start="dummy",
         artifact=artifact,
         max_steps=10,
@@ -269,9 +276,9 @@ def _smoke_test_3(console: Console):
     from aidu.ai.llm.clients.openai import OpenAIClient
 
     context = Context()
-    controller = Controller()
+    controller = Controller(context=context)
 
-    client = OpenAIClient()
+    client = OpenAIClient(model="gpt-4o")
 
     agents = {
         "math_tutor": AgentProcessor(MathTutor(client)),
@@ -287,14 +294,15 @@ def _smoke_test_3(console: Console):
     console.print(starting_artifact)
 
     for count, r, step in controller.run(
-        agents=agents,
+        processors=agents,
         start="math_tutor",
         artifact=starting_artifact,
         max_steps=3,
-        console=console,
+        #console=console,
     ):
-        console.print(Rule(f"step {count}: {r.target if r else 'no recommendation'}"))
-        console.print(step)
+        pass
+        # console.print(Rule(f"step {count}: {r.target if r else 'no recommendation'}"))
+        # console.print(step)
 
     console.print("\n[green]✓ Smoke Test 3 Passed[/green]")
 

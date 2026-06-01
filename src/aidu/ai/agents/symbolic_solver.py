@@ -1,6 +1,7 @@
 import logging
 
 from json import dumps
+from uuid import uuid4
 
 from aidu.ai.symbolic.engine import Engine
 from aidu.ai.symbolic.engines.SymbolicSolver import solve_math_problem_with_sympy
@@ -31,7 +32,7 @@ class SymbolicSolver(Engine):
             "content": {
                 "artifacts": [
                     {
-                        "id": "problem",
+                        "id": str(uuid4()),
                         "type": "symbolic",
                         "content": result["result"],
                     }
