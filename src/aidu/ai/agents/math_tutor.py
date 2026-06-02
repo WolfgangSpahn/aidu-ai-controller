@@ -52,6 +52,9 @@ class MathTutor(LLMAgent):
                   
         """).strip()
 
+    id: str = "math_tutor"
+    target: str = "input"
+
     def fc_route_symbolic_solver(self, context: Context, problem: str) -> tuple[Message, Context]:
         """
         Use this function when symbolic mathematics is required. Use SymPy syntax for the problem statement,
@@ -93,13 +96,15 @@ class MathTutor(LLMAgent):
             # ----------------------------------------------------------
 
             message = {
-                "role": "assistant",
+                "role": self.role,
                 "type": "route",
                 "content": {
                     "artifacts": [
                         {
                             "id": str(uuid4()),
                             "type": artifact_type,
+                            "producer": f"{self.id}:fc_route_symbolic_solver",
+                            "step": context.step,
                             "content": problem,
                         }
                     ],
@@ -119,13 +124,15 @@ class MathTutor(LLMAgent):
             logger.exception("fc_route_symbolic_solver failed")
 
             message = {
-                "role": "assistant",
+                "role": self.role,
                 "type": "route",
                 "content": {
                     "artifacts": [
                         {
                             "id": str(uuid4()),
                             "type": "error",
+                            "producer": f"{self.id}:fc_route_symbolic_solver",
+                            "step": context.step,
                             "content": str(e),
                         }
                     ],

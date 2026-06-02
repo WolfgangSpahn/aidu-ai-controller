@@ -10,13 +10,14 @@ logger = logging.getLogger(__name__)
 
 
 class SymbolicSolver(Engine):
+    id = "symbolic_solver"
     process = staticmethod(solve_math_problem_with_sympy)
 
     def ask(
         self,
         message,
         context,
-        config=None,
+        ask_config=None,
     ):
         logger.debug(f"SymbolicSolver received message: {dumps(message, indent=2)}")
         result = self.process(message["content"])
@@ -27,19 +28,21 @@ class SymbolicSolver(Engine):
         # ----------------------------------------------------------
 
         message = {
-            "role": "assistant",
+            "role": self.role,
             "type": "route",
             "content": {
                 "artifacts": [
                     {
                         "id": str(uuid4()),
                         "type": "symbolic",
+                        "producer": self.id,
+                        "step": context.step,
                         "content": result["result"],
                     }
                 ],
                 "recommendations": [
                     {
-                        "target": "math_tutor",
+                        "target": "input",
                         "utility": 1.0,
                         "rationale": "comment on the solution requested",
                     }
