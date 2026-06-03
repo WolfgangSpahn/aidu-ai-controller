@@ -48,9 +48,11 @@ class Controller:
         Select recommendation with highest utility.
     """
 
-    def __init__(self, context: Context = None, show_trace: bool = False):
+    def __init__(self, context: Context, processors: dict[str, Processor], show_trace: bool = False):
         self.context = context
         self.mailbox = deque()
+        self.show_trace = show_trace
+        self.processors = processors
 
     def select(self, rs):
 
@@ -138,89 +140,14 @@ class Controller:
 
             return event
 
-    def run(self, processors: dict, start: str, artifact: Artifact, max_step: int = 10, console: Console = None) -> Context:
+    def run(self, start: str, artifact: Artifact, max_step: int = 10, console: Console = None) -> Context:
         self.start(start, artifact)
 
         while self.mailbox:
-            self.step_once(processors, max_step=max_step, console=console)
+            self.step_once(self.processors, max_step=max_step, console=console)
 
         return self.context
 
-    def run_old(self, processors: dict, start: str, artifact: Artifact, max_step: int = 10, console: Console = None) -> Context:
-
-        mailbox = deque()
-        step = 0
-        mailbox.append(ProcessorRequested(target=start, artifact=artifact))
-        self.context.artifacts[artifact.id] = artifact
-        logger.debug(f"[{step}] [contr context] {self.context}")
-        while mailbox:
-            event = mailbox.popleft()
-
-            # logger.debug(f"\n[event] {event}")
-
-            if isinstance(event, Stop):
-                logger.debug("\n[green]Controller stopped[/green]")
-                break
-
-            if isinstance(event, ProcessorRequested):
-                processor = processors[event.target]
-                # logger.debug(f"[event] {event}")
-
-                # ------------------------------------------------------
-                # Execute processor
-                # ------------------------------------------------------
-
-                agent_context = self.build_agent_context(processor)
-
-                logger.debug(f"[{step}] [agent context] {agent_context}")
-
-                step, res = processor.run(
-                    step,
-                    event.artifact,
-                    context=agent_context,
-                    console=console,
-                )
-                logger.debug(f"[{step}] [result] {res}")
-
-                # ------------------------------------------------------
-                # Update current artifact
-                # ------------------------------------------------------
-
-                if res.artifacts:
-                    artifact = res.artifacts[0]
-                else:
-                    logger.warning(f"Processor {processor.id} did not return any artifacts; keeping previous artifact")
-
-                # ------------------------------------------------------
-                # Select next recommendation
-                # ------------------------------------------------------
-
-                r = self.select(res.recommendations)
-
-                # ------------------------------------------------------
-                # Update context and mailbox
-                # ------------------------------------------------------
-
-                self.context.step = step
-                self.context.artifacts[artifact.id] = artifact
-
-                # When having reached max step or having no recommendation, we stop the controller by sending a Stop event to the mailbox.
-                if step >= max_step or r is None:
-                    mailbox.append(Stop())
-                    continue
-
-                mailbox.append(
-                    ProcessorRequested(
-                        target=r.target,
-                        artifact=artifact,
-                    )
-                )
-
-                if artifact.producer != "input":
-                    console.print(f"[bold blue]{artifact.producer}> [/bold blue]{artifact.content}")
-
-        # Return final artifact via StopIteration.value when iterated to completion.
-        return self.context
 
 
 # ------------------------------------------------------------------------------
@@ -239,7 +166,7 @@ def _smoke_test(console: Console):
     context = Context()
     context.control.data["input_mode"] = "interactive"
 
-    controller = Controller(context=context)
+
 
     client = OpenAIClient(model="gpt-4o-mini")
 
@@ -252,6 +179,8 @@ def _smoke_test(console: Console):
         "symbolic_solver": AgentProcessor(SymbolicSolver()),
     }
 
+    controller = Controller(context=context, processors=processors, show_trace=True)
+
     starting_artifact = SymbolicArtifact(
         id=str(uuid4()),
         type="text",
@@ -261,7 +190,6 @@ def _smoke_test(console: Console):
     )
 
     controller.run(
-        processors=processors,
         start="input",
         artifact=starting_artifact,
         max_step=10,
