@@ -3,16 +3,12 @@ Math tutor agent
 """
 
 import logging
-import re
 import textwrap
-from uuid import uuid4
+
+from aidu.ai.llm.agent import LLMAgent
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-from aidu.ai.llm.agent import LLMAgent
-from aidu.ai.core.context import Context, Message
-from aidu.support.regex.validate import assert_valid_sympy_problem
 
 
 class ChatBot(LLMAgent):

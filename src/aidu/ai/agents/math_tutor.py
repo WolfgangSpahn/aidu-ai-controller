@@ -3,16 +3,16 @@ Math tutor agent
 """
 
 import logging
-import re
 import textwrap
 from uuid import uuid4
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 from aidu.ai.llm.agent import LLMAgent
 from aidu.ai.core.context import Context, Message
 from aidu.support.regex.validate import assert_valid_sympy_problem
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class MathTutor(LLMAgent):
@@ -99,22 +99,8 @@ class MathTutor(LLMAgent):
                 "role": self.role,
                 "type": "route",
                 "content": {
-                    "artifacts": [
-                        {
-                            "id": str(uuid4()),
-                            "type": artifact_type,
-                            "producer": f"{self.id}:fc_route_symbolic_solver",
-                            "step": context.step,
-                            "content": problem,
-                        }
-                    ],
-                    "recommendations": [
-                        {
-                            "target": "symbolic_solver",
-                            "utility": 1.0,
-                            "rationale": "symbolic computation requested",
-                        }
-                    ],
+                    "artifacts": [{"id": str(uuid4()), "type": artifact_type, "producer": f"{self.id}:fc_route_symbolic_solver", "step": context.step, "content": problem}],
+                    "recommendations": [{"target": "symbolic_solver", "utility": 1.0, "rationale": "symbolic computation requested"}],
                 },
             }
 
@@ -127,22 +113,8 @@ class MathTutor(LLMAgent):
                 "role": self.role,
                 "type": "route",
                 "content": {
-                    "artifacts": [
-                        {
-                            "id": str(uuid4()),
-                            "type": "error",
-                            "producer": f"{self.id}:fc_route_symbolic_solver",
-                            "step": context.step,
-                            "content": str(e),
-                        }
-                    ],
-                    "recommendations": [
-                        {
-                            "target": "math_tutor",
-                            "utility": 1.0,
-                            "rationale": "received invalid problem statement, need to handle the error",
-                        }
-                    ],
+                    "artifacts": [{"id": str(uuid4()), "type": "error", "producer": f"{self.id}:fc_route_symbolic_solver", "step": context.step, "content": str(e)}],
+                    "recommendations": [{"target": "math_tutor", "utility": 1.0, "rationale": "received invalid problem statement, need to handle the error"}],
                 },
             }
 

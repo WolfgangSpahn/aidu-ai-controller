@@ -1,20 +1,14 @@
 import logging
 from collections import deque
-from contextlib import nullcontext
 from uuid import uuid4
 
 from pydantic import BaseModel
-from rich import print
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.live import Live
-from rich.rule import Rule
 
-from aidu.ai.core.processor_result import ProcessorResult
+
 from aidu.ai.core.artifacts import Artifact, SymbolicArtifact
-from aidu.ai.core.recommendation import Recommendation
 from aidu.ai.core.context import Context
-from aidu.ai.controller.monitor import Monitor
 from aidu.ai.controller.processor import DummyProcessor, EchoProcessor, Processor, UserInputProcessor
 
 logger = logging.getLogger(__name__)
@@ -56,7 +50,8 @@ class Controller:
 
     def __init__(self, context: Context = None, show_trace: bool = False):
         self.context = context
-        self.monitor = Monitor(context, show_trace)
+        self.mailbox = deque()
+
     def select(self, rs):
 
         if not rs:
@@ -86,13 +81,78 @@ class Controller:
 
         return ctx
 
-    def run(self, processors: dict, start: str, artifact: Artifact, max_step: int = 10, console: Console = None, cockpit: bool = False) -> Context:
-        logger.debug(f"[context] {self.context}")
+    def start(self, start: str, artifact: Artifact) -> None:
+        self.mailbox.clear()
+        self.mailbox.append(ProcessorRequested(target=start, artifact=artifact))
+        self.context.artifacts[artifact.id] = artifact
+        logger.debug(f"[{self.context.step}] [contr context] {self.context}")
+
+    def step_once(self, processors: dict, max_step: int = 10, console: Console | None = None) -> Event | None:
+        if not self.mailbox:
+            return None
+
+        event = self.mailbox.popleft()
+
+        if isinstance(event, Stop):
+            logger.debug("\n[green]Controller stopped[/green]")
+            return event
+
+        if isinstance(event, ProcessorRequested):
+            processor = processors[event.target]
+            agent_context = self.build_agent_context(processor)
+
+            logger.debug(f"[{self.context.step}] [agent context] {agent_context}")
+
+            step, res = processor.run(
+                self.context.step,
+                event.artifact,
+                context=agent_context,
+                console=console,
+            )
+
+            logger.debug(f"[{step}] [result] {res}")
+
+            if res.artifacts:
+                artifact = res.artifacts[0]
+            else:
+                logger.warning(f"Processor {processor.id} did not return any artifacts; keeping previous artifact")
+                artifact = event.artifact
+
+            recommendation = self.select(res.recommendations)
+
+            self.context.step = step
+            self.context.artifacts[artifact.id] = artifact
+
+            if step >= max_step or recommendation is None:
+                self.mailbox.append(Stop())
+            else:
+                self.mailbox.append(
+                    ProcessorRequested(
+                        target=recommendation.target,
+                        artifact=artifact,
+                    )
+                )
+
+            if console and artifact.producer != "input":
+                console.print(f"[bold blue]{artifact.producer}> [/bold blue]{artifact.content}")
+
+            return event
+
+    def run(self, processors: dict, start: str, artifact: Artifact, max_step: int = 10, console: Console = None) -> Context:
+        self.start(start, artifact)
+
+        while self.mailbox:
+            self.step_once(processors, max_step=max_step, console=console)
+
+        return self.context
+
+    def run_old(self, processors: dict, start: str, artifact: Artifact, max_step: int = 10, console: Console = None) -> Context:
+
         mailbox = deque()
         step = 0
         mailbox.append(ProcessorRequested(target=start, artifact=artifact))
         self.context.artifacts[artifact.id] = artifact
-
+        logger.debug(f"[{step}] [contr context] {self.context}")
         while mailbox:
             event = mailbox.popleft()
 
@@ -104,7 +164,7 @@ class Controller:
 
             if isinstance(event, ProcessorRequested):
                 processor = processors[event.target]
-                logger.debug(f"[event] {event}")
+                # logger.debug(f"[event] {event}")
 
                 # ------------------------------------------------------
                 # Execute processor
@@ -125,8 +185,6 @@ class Controller:
                 # ------------------------------------------------------
                 # Update current artifact
                 # ------------------------------------------------------
-
-                prev_artifact = artifact
 
                 if res.artifacts:
                     artifact = res.artifacts[0]
@@ -158,130 +216,23 @@ class Controller:
                     )
                 )
 
-                if artifact.producer != 'input':
+                if artifact.producer != "input":
                     console.print(f"[bold blue]{artifact.producer}> [/bold blue]{artifact.content}")
 
         # Return final artifact via StopIteration.value when iterated to completion.
         return self.context
 
-# ------------------------------------------------------------------------------
-# Smoke Test 1
-# ------------------------------------------------------------------------------
-
-
-def _smoke_test_1():
-
-    result = ProcessorResult(
-        artifacts=[],
-        recommendations=[
-            Recommendation(
-                target="belief_updater",
-                utility=0.9,
-            ),
-            Recommendation(
-                target="tutor",
-                utility=0.4,
-            ),
-        ],
-    )
-
-    controller = Controller()
-
-    r = controller.select(result.recommendations)
-
-    assert r.target == "belief_updater"
-
-    print("\n[green]✓ Smoke Test 1 Passed[/green]")
-
 
 # ------------------------------------------------------------------------------
-# Smoke Test 2
+# Smoke Test
 # ------------------------------------------------------------------------------
 
 
-def _smoke_test_2(console: Console):
-
-    controller = Controller()
-
-    processors = {
-        "dummy": DummyProcessor(),
-    }
-
-    artifact = SymbolicArtifact(
-        id="counter_0",
-        content=0,
-    )
-
-    artifact = controller.run(
-        processors=processors,
-        start="dummy",
-        artifact=artifact,
-        max_step=10,
-    )
-
-    console.print(Rule("\n[final artifact]"))
-    console.print(artifact)
-
-    assert artifact.content == 10
-
-    console.print("\n[green]✓ Smoke Test 2 Passed[/green]")
-
-
-# ------------------------------------------------------------------------------
-# Smoke Test 3
-# ------------------------------------------------------------------------------
-
-
-def _smoke_test_3(console: Console):
-
-    from aidu.ai.agents.math_tutor import MathTutor
-    from aidu.ai.agents.symbolic_solver import SymbolicSolver
-    from aidu.ai.core.artifacts import TextArtifact
-    from aidu.ai.controller.processor import AgentProcessor
-    from aidu.ai.llm.clients.openai import OpenAIClient
-
-    context = Context()
-    
-    controller = Controller(context=context)
-
-    client = OpenAIClient(model="gpt-4o")
-
-    agents = {
-        "math_tutor": AgentProcessor(MathTutor(client)),
-        "symbolic_solver": AgentProcessor(SymbolicSolver()),
-    }
-
-    starting_artifact = TextArtifact(
-        id=str(uuid4()),
-        type="text",
-        producer="starter",
-        step=0,
-        content="Differentiate 4*x**3",
-    )
-
-    # console.print(Rule(f"start: target='math_tutor' receives the problem artifact"))
-    # console.print(starting_artifact)
-
-    artifacts = controller.run(
-        processors=agents,
-        start="math_tutor",
-        artifact=starting_artifact,
-        max_step=10,
-        console=console,
-    )
-
-    # console.print(Rule(f"final context"))
-    # console.print(artifacts)
-
-    # console.print("\n[green]✓ Smoke Test 3 Passed[/green]")
-
-
-def _smoke_test_4(console: Console):
+def _smoke_test(console: Console):
 
     from aidu.ai.agents.math_tutor import MathTutor
     from aidu.ai.agents.chat_bot import ChatBot
     from aidu.ai.agents.symbolic_solver import SymbolicSolver
-    from aidu.ai.core.artifacts import TextArtifact
     from aidu.ai.controller.processor import AgentProcessor
     from aidu.ai.llm.clients.openai import OpenAIClient
 
@@ -290,7 +241,7 @@ def _smoke_test_4(console: Console):
 
     controller = Controller(context=context)
 
-    client = OpenAIClient(model="gpt-4o")
+    client = OpenAIClient(model="gpt-4o-mini")
 
     processors = {
         "input": UserInputProcessor("math_tutor"),
@@ -309,14 +260,13 @@ def _smoke_test_4(console: Console):
         content="Hi!",
     )
 
-    artifacts = controller.run(
+    controller.run(
         processors=processors,
         start="input",
         artifact=starting_artifact,
         max_step=10,
         console=console,
     )
-
 
 
 # ------------------------------------------------------------------------------
@@ -331,12 +281,5 @@ if __name__ == "__main__":
         datefmt="[%X]",
         handlers=[RichHandler(console=console)],
     )
-    # _smoke_test_1()
 
-    # print()
-
-    # _smoke_test_2()
-
-    # print()
-
-    _smoke_test_4(console)
+    _smoke_test(console)

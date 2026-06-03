@@ -115,7 +115,7 @@ class Processor(ABC):
                 recommendations=[Recommendation.model_validate(r) for r in content.get("recommendations", [])],
             )
 
-        logger.debug(f"Response does not contain a route message.")
+        logger.debug("Response does not contain a route message.")
         return ProcessorResult(
             artifacts=[
                 TextArtifact(
@@ -186,7 +186,6 @@ class DummyProcessor:
         )
 
         logger.debug(f"DummyProcessor result: {result}")
-        
 
         return next_step, result
 
@@ -199,7 +198,7 @@ class EchoProcessor(Processor):
 
         value = "you said, " + artifact.content
 
-        next_step = step + 1        
+        next_step = step + 1
 
         result = ProcessorResult(
             artifacts=[
@@ -220,7 +219,6 @@ class EchoProcessor(Processor):
         )
 
         logger.debug(f"EchoProcessor result: {result}")
-        
 
         return next_step, result
 
@@ -241,7 +239,7 @@ class UserInputProcessor(Processor):
         if user_input is None:
             if console is None:
                 raise ValueError("UserInputProcessor requires input in context.control.data['user_input'] when no console is provided")
-            console.print(f"[bold green]user>[/bold green] ", end="")
+            console.print("[bold green]user>[/bold green] ", end="")
             user_input = console.input()
 
         next_step = step + 1
@@ -267,6 +265,5 @@ class UserInputProcessor(Processor):
         )
 
         logger.debug(f"UserInputProcessor result: {result}")
-        
 
-        return next_step, result     
+        return next_step, result
