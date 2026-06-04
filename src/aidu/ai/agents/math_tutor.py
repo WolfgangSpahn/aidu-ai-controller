@@ -9,10 +9,12 @@ from uuid import uuid4
 
 from aidu.ai.llm.agent import LLMAgent
 from aidu.ai.core.context import Context, Message
+from aidu.ai.core.recommendation import Recommendation
+from aidu.ai.core.artifacts import Artifact, SymbolicArtifact
 from aidu.support.regex.validate import assert_valid_sympy_problem
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 
 class MathTutor(LLMAgent):
@@ -53,7 +55,6 @@ class MathTutor(LLMAgent):
         """).strip()
 
     id: str = "math_tutor"
-    target: str = "input"
 
     def fc_route_symbolic_solver(self, context: Context, problem: str) -> tuple[Message, Context]:
         """
@@ -77,10 +78,12 @@ class MathTutor(LLMAgent):
 
         """
 
+        producer = f"{self.id}:fc_route_symbolic_solver"
+
         try:
             # ----------------------------------------------------------
-            # Repair common LLM mistakes
-            # ----------------§------------------------------------------
+            # Process LLM function call with validation and error handling
+            # ----------------------------------------------------------
 
             if problem is None:
                 raise ValueError("Missing required parameter: problem")
@@ -89,33 +92,43 @@ class MathTutor(LLMAgent):
                 problem = str(problem)
             assert_valid_sympy_problem(problem)
 
-            artifact_type = "symbolic"
+            default_target = "symbolic_solver"
 
             # ----------------------------------------------------------
-            # Harmonized route message
+            # Build Artifact and Recommendation for routing to the symbolic solver
+            # ----------------------------------------------------------
+
+            artifact     = SymbolicArtifact(producer=producer, step=context.step, content=problem)
+            recommendation = Recommendation(target=default_target, utility=1.0, rationale="symbolic computation requested")
+
+            # ----------------------------------------------------------
+            # Return route message
             # ----------------------------------------------------------
 
             message = {
                 "role": self.role,
                 "type": "route",
-                "content": {
-                    "artifacts": [{"id": str(uuid4()), "type": artifact_type, "producer": f"{self.id}:fc_route_symbolic_solver", "step": context.step, "content": problem}],
-                    "recommendations": [{"target": "symbolic_solver", "utility": 1.0, "rationale": "symbolic computation requested"}],
-                },
+                "content": {"artifacts": [artifact.model_dump()], "recommendations": [recommendation.model_dump()]},
             }
+            logger.debug(f"fc_route_symbolic_solver produced message: {message}")
 
             return message, context
 
         except Exception as e:
+            # ----------------------------------------------------------
+            # Handle errors gracefully and route to an error target
+            # ----------------------------------------------------------
+
             logger.exception("fc_route_symbolic_solver failed")
+            error_target = "math_tutor"
+
+            artifact = SymbolicArtifact(producer=producer, step=context.step, content=str(e))
+            recommendation = Recommendation(target=error_target, utility=1.0, rationale="error in processing symbolic problem")
 
             message = {
                 "role": self.role,
                 "type": "route",
-                "content": {
-                    "artifacts": [{"id": str(uuid4()), "type": "error", "producer": f"{self.id}:fc_route_symbolic_solver", "step": context.step, "content": str(e)}],
-                    "recommendations": [{"target": "math_tutor", "utility": 1.0, "rationale": "received invalid problem statement, need to handle the error"}],
-                },
+                "content": {"artifacts": [artifact.model_dump()], "recommendations": [recommendation.model_dump()]},
             }
-
+            logger.debug(f"fc_route_symbolic_solver produced error message: {message}")
             return message, context

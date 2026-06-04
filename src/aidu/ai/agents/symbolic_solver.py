@@ -42,7 +42,7 @@ class SymbolicSolver(Engine):
                 ],
                 "recommendations": [
                     {
-                        "target": "input",
+                        "target": "exit",
                         "utility": 1.0,
                         "rationale": "comment on the solution requested",
                     }

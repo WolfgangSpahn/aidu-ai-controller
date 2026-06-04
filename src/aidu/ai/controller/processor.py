@@ -29,11 +29,8 @@ class Processor(ABC):
     Processors never invoke each other directly.
     """
 
-    name: str = "processor"
-
-    consumes: list[type[Artifact]] = []
-
-    produces: list[type[Artifact]] = []
+    id: str = "processor"
+    name: str = "Base Processor"
 
     @abstractmethod
     def run(self, step: int, artifact: Artifact, context: Context = None, console=None) -> ProcessorResult:
@@ -130,6 +127,10 @@ class Processor(ABC):
 
 
 class AgentProcessor(Processor):
+    """
+    A processor that wraps an agent and allows it to be called as part of the processing flow.
+    """
+    id = "agent_processor"
     def __init__(self, agent):
         self.agent = agent
 
@@ -156,6 +157,9 @@ class AgentProcessor(Processor):
 
 
 class DummyProcessor:
+    """
+    A processor that increments the content of a SymbolicArtifact by 1.
+    """
     id = "dummy"
 
     def run(self, step: int, artifact: SymbolicArtifact, context: Context, console=None) -> ProcessorResult:
@@ -191,7 +195,13 @@ class DummyProcessor:
 
 
 class EchoProcessor(Processor):
+    """
+    A processor that echoes the content of a TextArtifact back as a SymbolicArtifact.
+    """
     id = "echo"
+
+    def __init__(self, target: str = "input"):
+        self.target = target
 
     def run(self, step: int, artifact: TextArtifact, context: Context, console=None) -> ProcessorResult:
         logger.debug(f"EchoProcessor received artifact: {artifact}")
@@ -211,7 +221,7 @@ class EchoProcessor(Processor):
             ],
             recommendations=[
                 Recommendation(
-                    target="input",
+                    target=self.target,
                     utility=1.0,
                     rationale="echo input",
                 )
@@ -224,6 +234,9 @@ class EchoProcessor(Processor):
 
 
 class UserInputProcessor(Processor):
+    """
+    A processor that gets user input from the console or context and produces a TextArtifact.
+    """
     id = "input"
 
     def __init__(self, target: str = "chat_bot"):
@@ -246,6 +259,11 @@ class UserInputProcessor(Processor):
 
         context.step = next_step
 
+        # if user_input.lower() == "exit":
+        #     target = "exit"
+        # else:
+        #     target = self.target
+
         result = ProcessorResult(
             artifacts=[
                 SymbolicArtifact(
@@ -259,11 +277,17 @@ class UserInputProcessor(Processor):
                 Recommendation(
                     target=self.target,
                     utility=1.0,
-                    rationale="getting user input",
+                    rationale="processing user input",
                 )
             ],
         )
 
-        logger.debug(f"UserInputProcessor result: {result}")
-
         return next_step, result
+
+
+class ExitProcessor(Processor):
+    """
+    A processor that signals the controller to stop execution when reached.
+    """
+    id = "exit"
+

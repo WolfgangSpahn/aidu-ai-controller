@@ -1,4 +1,5 @@
 import logging
+import sys
 from collections import deque
 from uuid import uuid4
 
@@ -12,7 +13,7 @@ from aidu.ai.core.context import Context
 from aidu.ai.controller.processor import DummyProcessor, EchoProcessor, Processor, UserInputProcessor
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 
 # ------------------------------------------------------------------------------
@@ -48,7 +49,8 @@ class Controller:
         Select recommendation with highest utility.
     """
 
-    def __init__(self, context: Context, processors: dict[str, Processor], show_trace: bool = False):
+    def __init__(self, name: str, context: Context, processors: dict[str, Processor], show_trace: bool = False):
+        self.name = name
         self.context = context
         self.mailbox = deque()
         self.show_trace = show_trace
@@ -83,27 +85,34 @@ class Controller:
 
         return ctx
 
-    def start(self, start: str, artifact: Artifact) -> None:
+    def start(self, start: str, artifact: Artifact, console: Console | None = None) -> None:
+        assert start in self.processors, f"Starting processor '{start}' not found in {list(self.processors.keys()) + ['exit']} of {self.name}"
         self.mailbox.clear()
         self.mailbox.append(ProcessorRequested(target=start, artifact=artifact))
         self.context.artifacts[artifact.id] = artifact
-        logger.debug(f"[{self.context.step}] [contr context] {self.context}")
+        if console:
+            console.print(f"[bold red]from {artifact.producer}> [/bold red]{artifact.content}")
+        logger.debug(f"[{self.name}] [{self.context.step}] [contr context] {self.context}")
 
     def step_once(self, processors: dict, max_step: int = 10, console: Console | None = None) -> Event | None:
         if not self.mailbox:
             return None
 
         event = self.mailbox.popleft()
+        logger.debug(f"[event][{self.name}] [{self.context.step}] {type(event).__name__}: {event}")
 
         if isinstance(event, Stop):
-            logger.debug("\n[green]Controller stopped[/green]")
+            logger.debug(f"[{self.name}] Controller stopped")
             return event
 
         if isinstance(event, ProcessorRequested):
+            if event.target not in processors:
+                logger.error(f"[{self.name}] Processor '{event.target}' not found in {processors.keys()}; skipping")
+                return event
             processor = processors[event.target]
             agent_context = self.build_agent_context(processor)
 
-            logger.debug(f"[{self.context.step}] [agent context] {agent_context}")
+            logger.debug(f"[{self.name}] [{self.context.step}] [agent context] {agent_context}")
 
             step, res = processor.run(
                 self.context.step,
@@ -112,7 +121,7 @@ class Controller:
                 console=console,
             )
 
-            logger.debug(f"[{step}] [result] {res}")
+            logger.debug(f"[{self.name}] [{step}] [result] {res}")
 
             if res.artifacts:
                 artifact = res.artifacts[0]
@@ -120,12 +129,19 @@ class Controller:
                 logger.warning(f"Processor {processor.id} did not return any artifacts; keeping previous artifact")
                 artifact = event.artifact
 
+            logger.debug(f"[{self.name}] [{step}] [recommendations] {res.recommendations}")
+
             recommendation = self.select(res.recommendations)
 
             self.context.step = step
             self.context.artifacts[artifact.id] = artifact
 
-            if step >= max_step or recommendation is None:
+            if recommendation.target not in processors and recommendation.target != "exit":
+                logger.error(f"Recommended processor '{recommendation.target}' of processor '{processor.id}' not found in {processors.keys()} of {self.name}; stopping")
+                self.mailbox.append(Stop())
+                return event
+
+            if step >= max_step or recommendation is None or recommendation.target == "exit":
                 self.mailbox.append(Stop())
             else:
                 self.mailbox.append(
@@ -141,13 +157,13 @@ class Controller:
             return event
 
     def run(self, start: str, artifact: Artifact, max_step: int = 10, console: Console = None) -> Context:
-        self.start(start, artifact)
+        assert start in self.processors, f"Starting processor '{start}' not found in {list(self.processors.keys()) + ['exit']} of {self.name}"
+        self.start(start, artifact, console=console)
 
         while self.mailbox:
             self.step_once(self.processors, max_step=max_step, console=console)
 
         return self.context
-
 
 
 # ------------------------------------------------------------------------------
@@ -166,8 +182,6 @@ def _smoke_test(console: Console):
     context = Context()
     context.control.data["input_mode"] = "interactive"
 
-
-
     client = OpenAIClient(model="gpt-4o-mini")
 
     processors = {
@@ -179,11 +193,9 @@ def _smoke_test(console: Console):
         "symbolic_solver": AgentProcessor(SymbolicSolver()),
     }
 
-    controller = Controller(context=context, processors=processors, show_trace=True)
+    controller = Controller("main_controller", context=context, processors=processors, show_trace=True)
 
     starting_artifact = SymbolicArtifact(
-        id=str(uuid4()),
-        type="text",
         producer="starter",
         step=0,
         content="Hi!",
@@ -195,7 +207,6 @@ def _smoke_test(console: Console):
         max_step=10,
         console=console,
     )
-
 
 # ------------------------------------------------------------------------------
 # Main
