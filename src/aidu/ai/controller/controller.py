@@ -9,8 +9,10 @@ from rich.logging import RichHandler
 
 
 from aidu.ai.core.artifacts import Artifact, SymbolicArtifact
+from aidu.ai.core.artifacts import Artifacts
 from aidu.ai.core.context import Context
-from aidu.ai.controller.processor import DummyProcessor, EchoProcessor, Processor, UserInputProcessor
+
+from aidu.ai.llm.agent import Agent, TextArtifact
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -25,10 +27,9 @@ class Event(BaseModel):
     pass
 
 
-class ProcessorRequested(Event):
-    target: str
-
-    artifact: Artifact
+class AgentRequested(Event):
+    target: type[Agent]
+    artifact: Artifacts
 
 
 class Stop(Event):
@@ -49,103 +50,169 @@ class Controller:
         Select recommendation with highest utility.
     """
 
-    def __init__(self, name: str, context: Context, processors: dict[str, Processor], show_trace: bool = False):
+    def __init__(self, name: str, context: Context, agents: list[type[Agent]]):
         self.name = name
         self.context = context
         self.mailbox = deque()
-        self.show_trace = show_trace
-        self.processors = processors
+        self.agents = {agent.__class__: agent() for agent in agents}
 
-    def select(self, rs):
+    def start(self, start: type[Agent], artifact: Artifact, console: Console | None = None) -> None:
+        """
+        Initialize a new controller execution.
 
-        if not rs:
-            return None
+        This method clears the controller mailbox, stores the initial
+        artifact in the global context, and schedules the first
+        ``AgentRequested`` event.
 
-        return max(rs, key=lambda r: r.utility)
+        Parameters
+        ----------
+        start:
+            The agent class that should receive the initial artifact.
 
-    def build_agent_context(self, processor: Processor) -> Context:
+        artifact:
+            The initial artifact that starts the workflow.
 
-        ctx = self.context.model_copy(deep=True)
+        console:
+            Optional Rich console used for interactive output.
 
-        if not hasattr(processor, "agent"):
-            return ctx
+        Raises
+        ------
+        AssertionError
+            If the specified starting agent is not registered with
+            the controller.
 
-        system_messages = processor.agent.build_system_prompt()
+        Notes
+        -----
+        The controller does not execute the starting agent directly.
+        Instead, it places an ``AgentRequested`` event into the mailbox.
+        Actual execution begins when ``step_once()`` processes that
+        event.
+        """
+        assert start in self.agents, f"Starting agent '{start.__name__}' not found"
 
-        # `build_system_prompt` returns a list of message dicts; merge
-        # them into the trace instead of nesting them under a single
-        # system message's `content` field (which breaks provider APIs).
-        if isinstance(system_messages, dict):
-            system_messages = [system_messages]
-
-        ctx.trace.messages = [
-            *system_messages,
-            *ctx.trace.messages,
-        ]
-
-        return ctx
-
-    def start(self, start: str, artifact: Artifact, console: Console | None = None) -> None:
-        assert start in self.processors, f"Starting processor '{start}' not found in {list(self.processors.keys()) + ['exit']} of {self.name}"
         self.mailbox.clear()
-        self.mailbox.append(ProcessorRequested(target=start, artifact=artifact))
+
+        self.mailbox.append(AgentRequested(target=start, artifact=artifact))
+
         self.context.artifacts[artifact.id] = artifact
+
         if console:
             console.print(f"[bold red]from {artifact.producer}> [/bold red]{artifact.content}")
-        logger.debug(f"[{self.name}] [{self.context.step}] [contr context] {self.context}")
 
-    def step_once(self, processors: dict, max_step: int = 10, console: Console | None = None) -> Event | None:
+    def step_once(self, max_step: int = 10, console: Console | None = None) -> Event | None:
+        """
+        Execute a single controller step.
+
+        The controller processes the next event from its mailbox and
+        updates the global execution context.
+
+        For an ``AgentRequested`` event, the controller:
+
+        1. Retrieves the target agent.
+        2. Invokes the agent's ``run()`` method.
+        3. Stores any returned artifacts in the context.
+        4. Selects the recommendation with the highest utility.
+        5. Enqueues the next ``AgentRequested`` event or stops execution.
+
+        Processing terminates when:
+
+        - a ``Stop`` event is encountered,
+        - no recommendation is produced,
+        - the maximum number of steps is reached,
+        - or the recommended target agent is unavailable.
+
+        Parameters
+        ----------
+        max_step:
+            Maximum number of controller steps before execution is
+            terminated.
+
+        console:
+            Optional Rich console used for interactive output.
+
+        Returns
+        -------
+        Event | None
+            The processed event, or ``None`` if the mailbox is empty.
+
+        Notes
+        -----
+        The current controller policy selects the recommendation with
+        the highest utility value. More advanced routing policies may
+        be introduced in future implementations.
+        """
+
         if not self.mailbox:
             return None
 
         event = self.mailbox.popleft()
+
         logger.debug(f"[event][{self.name}] [{self.context.step}] {type(event).__name__}: {event}")
+
+        # Handle events
 
         if isinstance(event, Stop):
             logger.debug(f"[{self.name}] Controller stopped")
             return event
 
-        if isinstance(event, ProcessorRequested):
-            if event.target not in processors:
-                logger.error(f"[{self.name}] Processor '{event.target}' not found in {processors.keys()}; skipping")
+        if isinstance(event, AgentRequested):
+            if event.target not in self.agents:
+                logger.error(f"[{self.name}] Agent '{event.target.__name__}' not found in {[agent.__name__ for agent in self.agents.keys()]}; stopping")
+                self.mailbox.append(Stop())
                 return event
-            processor = processors[event.target]
-            agent_context = self.build_agent_context(processor)
 
-            logger.debug(f"[{self.name}] [{self.context.step}] [agent context] {agent_context}")
+            agent = self.agents[event.target]
 
-            step, res = processor.run(
-                self.context.step,
-                event.artifact,
-                context=agent_context,
-                console=console,
+            # ----------------------------------------------------------------------
+            # Run agent
+            # ----------------------------------------------------------------------
+
+            result, self.context = agent.run(
+                artifact=event.artifact,
+                context=self.context,
+                agents=list(self.agents.values()),
             )
 
-            logger.debug(f"[{self.name}] [{step}] [result] {res}")
+            # ----------------------------------------------------------------------
+            # Process result
+            # ----------------------------------------------------------------------
 
-            if res.artifacts:
-                artifact = res.artifacts[0]
+            logger.debug(f"[{self.name}] [{self.context.step}] [result] {result}")
+
+            if result.artifacts:
+                artifact = result.artifacts[0]
             else:
-                logger.warning(f"Processor {processor.id} did not return any artifacts; keeping previous artifact")
+                logger.warning(f"Agent {agent.id} did not return any artifacts; keeping previous artifact")
                 artifact = event.artifact
 
-            logger.debug(f"[{self.name}] [{step}] [recommendations] {res.recommendations}")
-
-            recommendation = self.select(res.recommendations)
-
-            self.context.step = step
             self.context.artifacts[artifact.id] = artifact
 
-            if recommendation.target not in processors and recommendation.target != "exit":
-                logger.error(f"Recommended processor '{recommendation.target}' of processor '{processor.id}' not found in {processors.keys()} of {self.name}; stopping")
-                self.mailbox.append(Stop())
-                return event
+            logger.debug(f"[{self.name}] [{self.context.step}] [recommendations] {result.recommendations}")
 
-            if step >= max_step or recommendation is None or recommendation.target == "exit":
+            recommendation = max(result.recommendations, key=lambda r: r.utility) if result.recommendations else None
+
+            # ----------------------------------------------------------------------
+            # Process recommendation and update mailbox
+            # ----------------------------------------------------------------------
+
+            if recommendation is None:
                 self.mailbox.append(Stop())
+
+            elif recommendation.target not in self.agents:
+                logger.error(
+                    f"Recommended agent '{recommendation.target.__name__}' "
+                    f"of agent '{agent.id}' not found in "
+                    f"{[agent.__name__ for agent in self.agents.keys()]} "
+                    f"of {self.name}; stopping"
+                )
+                self.mailbox.append(Stop())
+
+            elif self.context.step >= max_step:
+                self.mailbox.append(Stop())
+
             else:
                 self.mailbox.append(
-                    ProcessorRequested(
+                    AgentRequested(
                         target=recommendation.target,
                         artifact=artifact,
                     )
@@ -156,12 +223,70 @@ class Controller:
 
             return event
 
-    def run(self, start: str, artifact: Artifact, max_step: int = 10, console: Console = None) -> Context:
-        assert start in self.processors, f"Starting processor '{start}' not found in {list(self.processors.keys()) + ['exit']} of {self.name}"
-        self.start(start, artifact, console=console)
+        logger.warning(f"[{self.name}] Unknown event type: {type(event).__name__}")
+        return event
+
+    def run(self, start: type[Agent], artifact: Artifact, max_step: int = 10, console: Console | None = None) -> Context:
+        """
+        Execute an agent workflow until completion.
+
+        The controller initializes execution with the supplied starting
+        agent and artifact, then repeatedly processes mailbox events
+        until no further work remains.
+
+        During execution, agents may emit recommendations describing
+        which agent should be invoked next. The controller follows the
+        recommendation with the highest utility and continues routing
+        artifacts between agents until a termination condition is reached.
+
+        Termination occurs when:
+
+        - a ``Stop`` event is encountered,
+        - no recommendation is produced,
+        - the maximum number of steps is reached,
+        - or execution cannot be routed to a valid agent.
+
+        Parameters
+        ----------
+        start:
+            The agent class that should receive the initial artifact.
+
+        artifact:
+            The initial artifact that starts the workflow.
+
+        max_step:
+            Maximum number of controller steps before execution is
+            terminated.
+
+        console:
+            Optional Rich console used for interactive output.
+
+        Returns
+        -------
+        Context
+            The final execution context containing the complete trace,
+            artifacts, state, and control information accumulated during
+            the workflow.
+
+        Notes
+        -----
+        The controller itself performs no domain reasoning. Its role is
+        to manage execution, maintain context, and route artifacts between
+        agents according to their recommendations.
+        """
+        assert start in self.agents, f"Starting agent '{start.__name__}' not found in {[agent.__name__ for agent in self.agents.keys()]}"
+
+        self.start(
+            start=start,
+            artifact=artifact,
+            console=console,
+        )
 
         while self.mailbox:
-            self.step_once(self.processors, max_step=max_step, console=console)
+            self.step_once(
+                max_step=max_step,
+                console=console,
+            )
 
         return self.context
 
@@ -173,40 +298,43 @@ class Controller:
 
 def _smoke_test(console: Console):
 
+    from aidu.ai.llm.agent import UserInput
     from aidu.ai.agents.math_tutor import MathTutor
     from aidu.ai.agents.chat_bot import ChatBot
     from aidu.ai.agents.symbolic_solver import SymbolicSolver
-    from aidu.ai.controller.processor import AgentProcessor
     from aidu.ai.llm.clients.openai import OpenAIClient
 
     context = Context()
-    context.control.data["input_mode"] = "interactive"
 
     client = OpenAIClient(model="gpt-4o-mini")
 
-    processors = {
-        "input": UserInputProcessor("math_tutor"),
-        "echo": EchoProcessor(),
-        "dummy": DummyProcessor(),
-        "chat_bot": AgentProcessor(ChatBot(client)),
-        "math_tutor": AgentProcessor(MathTutor(client)),
-        "symbolic_solver": AgentProcessor(SymbolicSolver()),
-    }
+    agents = [
+        UserInput(),
+        ChatBot(client),
+        MathTutor(client),
+        SymbolicSolver(),
+    ]
 
-    controller = Controller("main_controller", context=context, processors=processors, show_trace=True)
+    controller = Controller(
+        name="main_controller",
+        context=context,
+        agents=agents,
+        show_trace=True,
+    )
 
-    starting_artifact = SymbolicArtifact(
+    starting_artifact = TextArtifact(
         producer="starter",
         step=0,
-        content="Hi!",
+        content="",
     )
 
     controller.run(
-        start="input",
+        start=UserInput,
         artifact=starting_artifact,
         max_step=10,
         console=console,
     )
+
 
 # ------------------------------------------------------------------------------
 # Main
@@ -214,6 +342,7 @@ def _smoke_test(console: Console):
 
 if __name__ == "__main__":
     console = Console()
+
     logging.basicConfig(
         level="WARNING",
         format="%(message)s",
