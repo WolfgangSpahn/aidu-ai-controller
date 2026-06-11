@@ -1,3 +1,4 @@
+from copy import deepcopy
 import logging
 import sys
 from collections import deque
@@ -9,8 +10,7 @@ from rich.logging import RichHandler
 
 
 from aidu.ai.core.artifacts import Artifact, SymbolicArtifact
-from aidu.ai.core.artifacts import Artifacts
-from aidu.ai.core.context import Context
+from aidu.ai.core.context import Context, State
 
 from aidu.ai.llm.agent import Agent, TextArtifact
 
@@ -22,19 +22,17 @@ logger.setLevel(logging.INFO)
 # Events
 # ------------------------------------------------------------------------------
 
-
 class Event(BaseModel):
     pass
 
 
 class AgentRequested(Event):
     target: type[Agent]
-    artifact: Artifacts
-
+    artifact: Artifact
+    continuations: list[type[Agent]] = []
 
 class Stop(Event):
     pass
-
 
 # ------------------------------------------------------------------------------
 # Controller
@@ -54,7 +52,54 @@ class Controller:
         self.name = name
         self.context = context
         self.mailbox = deque()
-        self.agents = {agent.__class__: agent() for agent in agents}
+        self.agents = {agent.__class__: agent for agent in agents}
+
+    def build_agent_context(self, agent: Agent, context) -> Context:
+        """
+        Build the local context perceived by an agent.
+
+        The initial implementation exposes only:
+
+        - the global trace of messages (as context.trace.messages)
+        - the global artifacts (as context.artifacts)
+        - the global state (as context.state)
+        - the global control variables (as context.control)
+
+        Later versions may expose/filter out artifacts, beliefs,
+        observations, state variables, or other contextual information.
+        """
+        logger.debug(f"Global Messages: {context.trace.messages}")
+        new_context = deepcopy(context)
+
+        if not new_context.trace.messages:
+            logger.debug(f"Global trace is empty; build system prompt for agent {agent.__class__.__name__} without global messages")
+            if hasattr(agent, "build_system_prompt"):
+                new_context. trace.messages =agent.build_system_prompt(prompt_params=context.state.data[agent.__class__.__name__])
+            else:
+                new_context. trace.messages = [{"role": "system", "content": f"Dummy system prompt for {agent.__class__.__name__}"}]
+            return new_context
+
+
+        logger.debug(new_context.trace.messages)
+        # check if context.trace.messages[] has role system
+        old_system_message = new_context.trace.messages[0]
+        assert old_system_message["role"] == "system", "First message in trace is not a system message; agent may not receive expected system prompt"
+
+
+        if hasattr(agent, "build_system_prompt"):
+            new_context.trace.messages[0] = agent.build_system_prompt(prompt_params=context.state.data[agent.__class__.__name__])[0]
+
+        return new_context
+
+    def merge_context(self, global_context: Context, local_context: Context) -> Context:
+        """
+        Merge an agent-local context back into the controller context.
+
+        The initial policy is deliberately simple: the local context becomes
+        the new global context. Later versions may selectively merge trace,
+        artifacts, state, control, evidence, and beliefs.
+        """
+        return deepcopy(local_context)
 
     def start(self, start: type[Agent], artifact: Artifact, console: Console | None = None) -> None:
         """
@@ -164,15 +209,25 @@ class Controller:
             agent = self.agents[event.target]
 
             # ----------------------------------------------------------------------
-            # Run agent
+            # Run agent, manage context, and store results
             # ----------------------------------------------------------------------
 
-            result, self.context = agent.run(
+
+            # build a selected world view for the agent
+            agent_context = self.build_agent_context(agent, context=self.context)
+
+            result, agent_context = agent.run(
                 artifact=event.artifact,
-                context=self.context,
+                context=agent_context,
                 agents=list(self.agents.values()),
             )
 
+            logger.debug(f"Messages: {agent_context.trace.messages}")
+
+            self.context = self.merge_context(
+                global_context=self.context,
+                local_context=agent_context,
+            )
             # ----------------------------------------------------------------------
             # Process result
             # ----------------------------------------------------------------------
@@ -182,7 +237,7 @@ class Controller:
             if result.artifacts:
                 artifact = result.artifacts[0]
             else:
-                logger.warning(f"Agent {agent.id} did not return any artifacts; keeping previous artifact")
+                logger.debug(f"Agent {agent.id} did not return any artifacts; keeping previous artifact")
                 artifact = event.artifact
 
             self.context.artifacts[artifact.id] = artifact
@@ -192,38 +247,65 @@ class Controller:
             recommendation = max(result.recommendations, key=lambda r: r.utility) if result.recommendations else None
 
             # ----------------------------------------------------------------------
-            # Process recommendation and update mailbox
+            # Determine next step
             # ----------------------------------------------------------------------
 
-            if recommendation is None:
-                self.mailbox.append(Stop())
+            recommendation = (
+                max(result.recommendations, key=lambda r: r.utility)
+                if result.recommendations
+                else None
+            )
 
-            elif recommendation.target not in self.agents:
-                logger.error(
-                    f"Recommended agent '{recommendation.target.__name__}' "
-                    f"of agent '{agent.id}' not found in "
-                    f"{[agent.__name__ for agent in self.agents.keys()]} "
-                    f"of {self.name}; stopping"
-                )
-                self.mailbox.append(Stop())
+            # Workflow agent produced a new plan
+            if recommendation is not None:
 
-            elif self.context.step >= max_step:
-                self.mailbox.append(Stop())
+                if recommendation.target not in self.agents:
+                    logger.error(
+                        f"Recommended agent '{recommendation.target.__name__}' "
+                        f"not found; stopping"
+                    )
+                    self.mailbox.append(Stop())
 
-            else:
+                elif self.context.step >= max_step:
+                    self.mailbox.append(Stop())
+
+                else:
+                    self.mailbox.append(
+                        AgentRequested(
+                            target=recommendation.target,
+                            artifact=artifact,
+                            continuations=list(recommendation.continuations),
+                        )
+                    )
+
+            # Utility agent produced no recommendation:
+            # continue the existing plan
+            elif event.continuations:
+
+                next_target = event.continuations.pop(0)
+
                 self.mailbox.append(
                     AgentRequested(
-                        target=recommendation.target,
+                        target=next_target,
                         artifact=artifact,
+                        continuations=event.continuations,
                     )
-                )
+               )
 
-            if console and artifact.producer != "input":
+            # No recommendation and no remaining continuation
+            else:
+                self.mailbox.append(Stop())
+
+            # -------------------------------------------------------------------
+            # Optional console output for debugging and visualization
+            # -------------------------------------------------------------------§
+
+            if console and "Input" not in artifact.producer:
                 console.print(f"[bold blue]{artifact.producer}> [/bold blue]{artifact.content}")
 
             return event
 
-        logger.warning(f"[{self.name}] Unknown event type: {type(event).__name__}")
+        logger.debug(f"[{self.name}] Unknown event type: {type(event).__name__}")
         return event
 
     def run(self, start: type[Agent], artifact: Artifact, max_step: int = 10, console: Console | None = None) -> Context:
@@ -298,38 +380,66 @@ class Controller:
 
 def _smoke_test(console: Console):
 
-    from aidu.ai.llm.agent import UserInput
-    from aidu.ai.agents.math_tutor import MathTutor
+    from aidu.ai.llm.agent import UserInput, EchoAgent, DebugAgent
+
+    from aidu.ai.agents.math_tutor import MathTutor, MathUserInput
+    from aidu.ai.agents.chem_tutor import ChemTutor, ChemUserInput
     from aidu.ai.agents.chat_bot import ChatBot
     from aidu.ai.agents.symbolic_solver import SymbolicSolver
     from aidu.ai.llm.clients.openai import OpenAIClient
+    from aidu.ai.core.belief import StudentBelief
 
     context = Context()
 
-    client = OpenAIClient(model="gpt-4o-mini")
+    client = OpenAIClient(model="gpt-5-mini")
+    # Initialize belief state
+    belief = StudentBelief()
+    belief.engagement = 0.8
+    belief.confusion = 0.6
+    context.state.data["StudentBelief"] = belief
+    # ------------------------------------------------------------------------------
+    # Define agents and controller
+    # ------------------------------------------------------------------------------
 
     agents = [
-        UserInput(),
-        ChatBot(client),
-        MathTutor(client),
-        SymbolicSolver(),
+        ChemTutor(client, prompt_args={
+            "tutor_name": "Marie", 
+            "focus_area": "What is an atom?",
+            "level": "beginner",
+            "history": " - Student has mentioned that atoms have protons, you asked for more details.",
+            "student_progress": " - mentioned protons, not mentioned yet core, neutrons, electrons, or nucleus.",
+            "student_belief": " - " +context.state.data["StudentBelief"].to_text(),
+            **ChemTutor.default_state}
+            ),
+        DebugAgent(),
+        ChemUserInput(),
     ]
+
+    # Initialize state for each agent
+
+    for agent in agents:
+        context.state.data.setdefault(
+            agent.__class__.__name__,
+            getattr(agent, "default_state", {}).copy(),
+        )
+
+
 
     controller = Controller(
         name="main_controller",
         context=context,
         agents=agents,
-        show_trace=True,
+        # show_trace=True,
     )
 
     starting_artifact = TextArtifact(
         producer="starter",
         step=0,
-        content="",
+        content="An Atom has Neutrons.",
     )
 
     controller.run(
-        start=UserInput,
+        start=ChemTutor,
         artifact=starting_artifact,
         max_step=10,
         console=console,
