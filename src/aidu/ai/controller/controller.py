@@ -408,7 +408,7 @@ def _smoke_test(console: Console):
             "level": "beginner",
             "history": " - Student has mentioned that atoms have protons, you asked for more details.",
             "student_progress": " - mentioned protons, not mentioned yet core, neutrons, electrons, or nucleus.",
-            "student_belief": " - " +context.state.data["StudentBelief"].to_text(),
+            "student_belief": " - " +context.state.data["StudentBelief"].to_tutor_text(),
             **ChemTutor.default_state}
             ),
         DebugAgent(),
