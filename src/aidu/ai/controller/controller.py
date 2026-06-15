@@ -12,7 +12,7 @@ from rich.logging import RichHandler
 from aidu.ai.core.artifacts import Artifact, SymbolicArtifact
 from aidu.ai.core.context import Context, State
 
-from aidu.ai.llm.agent import Agent, TextArtifact
+from aidu.ai.llm.agent import Agent, EndArtifact, TextArtifact
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -197,7 +197,7 @@ class Controller:
         # Handle events
 
         if isinstance(event, Stop):
-            logger.debug(f"[{self.name}] Controller stopped")
+            logger.debug(f"[{self.name}] Controller stopped: {event}")
             return event
 
         if isinstance(event, AgentRequested):
@@ -215,6 +215,7 @@ class Controller:
 
             # build a selected world view for the agent
             agent_context = self.build_agent_context(agent, context=self.context)
+            agent_context.create_messages_trace()
 
             result, agent_context = agent.run(
                 artifact=event.artifact,
@@ -235,11 +236,14 @@ class Controller:
             logger.debug(f"[{self.name}] [{self.context.step}] [result] {result}")
 
             if result.artifacts:
-                artifact = result.artifacts[0]
+                artifact = result.artifacts[0] #TODO: Handle multiple artifacts
             else:
                 logger.debug(f"Agent {agent.id} did not return any artifacts; keeping previous artifact")
                 artifact = event.artifact
 
+            # Store artifact in global context
+            if isinstance(artifact, EndArtifact):
+                pass
             self.context.artifacts[artifact.id] = artifact
 
             logger.debug(f"[{self.name}] [{self.context.step}] [recommendations] {result.recommendations}")
