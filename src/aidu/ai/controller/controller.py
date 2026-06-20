@@ -48,11 +48,10 @@ class Controller:
         Select recommendation with highest utility.
     """
 
-    def __init__(self, name: str, context: Context, agents: list[type[Agent]]):
+    def __init__(self, name: str, agents: list[type[Agent]]):
         self.name = name
-        self.context = context
-        self.mailbox = deque()
-        self.agents = {agent.__class__: agent for agent in agents}
+        mailbox = deque()
+        self.agents_map = {agent.__class__: agent for agent in agents}
 
     def build_agent_context(self, agent: Agent, context) -> Context:
         """
@@ -74,9 +73,10 @@ class Controller:
         if not new_context.trace.messages:
             logger.debug(f"Global trace is empty; build system prompt for agent {agent.__class__.__name__} without global messages")
             if hasattr(agent, "build_system_prompt"):
-                new_context. trace.messages =agent.build_system_prompt(prompt_params=context.state.data[agent.__class__.__name__])
+                prompt_params = new_context.state.data[agent.__class__.__name__]
+                new_context.trace.messages = agent.build_system_prompt(prompt_params=prompt_params)
             else:
-                new_context. trace.messages = [{"role": "system", "content": f"Dummy system prompt for {agent.__class__.__name__}"}]
+                new_context.trace.messages = [{"role": "system", "content": f"Dummy system prompt for {agent.__class__.__name__}"}]
             return new_context
 
 
@@ -87,7 +87,8 @@ class Controller:
 
 
         if hasattr(agent, "build_system_prompt"):
-            new_context.trace.messages[0] = agent.build_system_prompt(prompt_params=context.state.data[agent.__class__.__name__])[0]
+            prompt_params = new_context.state.data[agent.__class__.__name__]
+            new_context.trace.messages[0] = agent.build_system_prompt(prompt_params=prompt_params)[0]
 
         return new_context
 
@@ -101,7 +102,7 @@ class Controller:
         """
         return deepcopy(local_context)
 
-    def start(self, start: type[Agent], artifact: Artifact, console: Console | None = None) -> None:
+    def start(self, start: type[Agent], mailbox, context, artifact: Artifact, console: Console | None = None) -> None:
         """
         Initialize a new controller execution.
 
@@ -133,18 +134,20 @@ class Controller:
         Actual execution begins when ``step_once()`` processes that
         event.
         """
-        assert start in self.agents, f"Starting agent '{start.__name__}' not found"
+        assert start in self.agents_map, f"Starting agent '{start.__name__}' not found"
+        context.check_agents_have_state(self.agents_map.values())
+        mailbox.clear()
 
-        self.mailbox.clear()
+        mailbox.append(AgentRequested(target=start, artifact=artifact))
 
-        self.mailbox.append(AgentRequested(target=start, artifact=artifact))
-
-        self.context.artifacts[artifact.id] = artifact
+        context.artifacts[artifact.id] = artifact
 
         if console:
             console.print(f"[bold red]from {artifact.producer}> [/bold red]{artifact.content}")
 
-    def step_once(self, max_step: int = 10, console: Console | None = None) -> Event | None:
+        return mailbox, context
+
+    def step_once(self, mailbox, context, max_step: int = 10, console: Console | None = None) -> tuple[Event | None, Context]:
         """
         Execute a single controller step.
 
@@ -186,27 +189,27 @@ class Controller:
         the highest utility value. More advanced routing policies may
         be introduced in future implementations.
         """
+        context.check_agents_have_state(self.agents_map.values())
+        if not mailbox:
+            return None, context
 
-        if not self.mailbox:
-            return None
+        event = mailbox.popleft()
 
-        event = self.mailbox.popleft()
-
-        logger.debug(f"[event][{self.name}] [{self.context.step}] {type(event).__name__}: {event}")
+        logger.debug(f"[event][{self.name}] [{context.step}] {type(event).__name__}: {event}")
 
         # Handle events
 
         if isinstance(event, Stop):
             logger.debug(f"[{self.name}] Controller stopped: {event}")
-            return event
+            return event, context
 
         if isinstance(event, AgentRequested):
-            if event.target not in self.agents:
-                logger.error(f"[{self.name}] Agent '{event.target.__name__}' not found in {[agent.__name__ for agent in self.agents.keys()]}; stopping")
-                self.mailbox.append(Stop())
-                return event
+            if event.target not in self.agents_map:
+                logger.error(f"[{self.name}] Agent '{event.target.__name__}' not found in {[agent.__name__ for agent in self.agents_map.keys()]}; stopping")
+                mailbox.append(Stop())
+                return event, context
 
-            agent = self.agents[event.target]
+            agent = self.agents_map[event.target]
 
             # ----------------------------------------------------------------------
             # Run agent, manage context, and store results
@@ -214,26 +217,26 @@ class Controller:
 
 
             # build a selected world view for the agent
-            agent_context = self.build_agent_context(agent, context=self.context)
+            agent_context = self.build_agent_context(agent, context=context)
             agent_context.create_messages_trace()
-
+            agent_context.check_agents_have_state(self.agents_map.values())
             result, agent_context = agent.run(
                 artifact=event.artifact,
                 context=agent_context,
-                agents=list(self.agents.values()),
+                agents=list(self.agents_map.values()),
             )
 
             logger.debug(f"Messages: {agent_context.trace.messages}")
 
-            self.context = self.merge_context(
-                global_context=self.context,
+            context = self.merge_context(
+                global_context=context,
                 local_context=agent_context,
             )
             # ----------------------------------------------------------------------
             # Process result
             # ----------------------------------------------------------------------
 
-            logger.debug(f"[{self.name}] [{self.context.step}] [result] {result}")
+            logger.debug(f"[{self.name}] [{context.step}] [result] {result}")
 
             if result.artifacts:
                 artifact = result.artifacts[0] #TODO: Handle multiple artifacts
@@ -244,9 +247,9 @@ class Controller:
             # Store artifact in global context
             if isinstance(artifact, EndArtifact):
                 pass
-            self.context.artifacts[artifact.id] = artifact
+            context.artifacts[artifact.id] = artifact
 
-            logger.debug(f"[{self.name}] [{self.context.step}] [recommendations] {result.recommendations}")
+            logger.debug(f"[{self.name}] [{context.step}] [recommendations] {result.recommendations}")
 
             recommendation = max(result.recommendations, key=lambda r: r.utility) if result.recommendations else None
 
@@ -263,18 +266,18 @@ class Controller:
             # Workflow agent produced a new plan
             if recommendation is not None:
 
-                if recommendation.target not in self.agents:
+                if recommendation.target not in self.agents_map:
                     logger.error(
-                        f"Recommended agent '{recommendation.target.__name__}' "
+                        f"Recommended agent '{recommendation.target.__name__ if hasattr(recommendation.target, '__name__') else str(recommendation.target)}' "
                         f"not found; stopping"
                     )
-                    self.mailbox.append(Stop())
+                    mailbox.append(Stop())
 
-                elif self.context.step >= max_step:
-                    self.mailbox.append(Stop())
+                elif context.step >= max_step:
+                    mailbox.append(Stop())
 
                 else:
-                    self.mailbox.append(
+                    mailbox.append(
                         AgentRequested(
                             target=recommendation.target,
                             artifact=artifact,
@@ -288,7 +291,7 @@ class Controller:
 
                 next_target = event.continuations.pop(0)
 
-                self.mailbox.append(
+                mailbox.append(
                     AgentRequested(
                         target=next_target,
                         artifact=artifact,
@@ -298,7 +301,7 @@ class Controller:
 
             # No recommendation and no remaining continuation
             else:
-                self.mailbox.append(Stop())
+                mailbox.append(Stop())
 
             # -------------------------------------------------------------------
             # Optional console output for debugging and visualization
@@ -307,12 +310,12 @@ class Controller:
             if console and "Input" not in artifact.producer:
                 console.print(f"[bold blue]{artifact.producer}> [/bold blue]{artifact.content}")
 
-            return event
+            return event, context
 
         logger.debug(f"[{self.name}] Unknown event type: {type(event).__name__}")
-        return event
+        return event, context
 
-    def run(self, start: type[Agent], artifact: Artifact, max_step: int = 10, console: Console | None = None) -> Context:
+    def run(self, start: type[Agent], artifact: Artifact, mailbox: deque, context: Context, max_step: int = 10, console: Console | None = None) -> Context:
         """
         Execute an agent workflow until completion.
 
@@ -360,21 +363,26 @@ class Controller:
         to manage execution, maintain context, and route artifacts between
         agents according to their recommendations.
         """
-        assert start in self.agents, f"Starting agent '{start.__name__}' not found in {[agent.__name__ for agent in self.agents.keys()]}"
+        assert start in self.agents_map, f"Starting agent '{start.__name__}' not found in {[agent.__name__ for agent in self.agents_map.keys()]}"
+        context.check_agents_have_state(self.agents_map.values())
 
         self.start(
+            mailbox=mailbox,
+            context=context,
             start=start,
             artifact=artifact,
             console=console,
         )
 
-        while self.mailbox:
-            self.step_once(
+        while mailbox:
+            _, context = self.step_once(
+                mailbox=mailbox,
+                context=context,
                 max_step=max_step,
                 console=console,
             )
 
-        return self.context
+        return context
 
 
 # ------------------------------------------------------------------------------
@@ -421,17 +429,10 @@ def _smoke_test(console: Console):
 
     # Initialize state for each agent
 
-    for agent in agents:
-        context.state.data.setdefault(
-            agent.__class__.__name__,
-            getattr(agent, "default_state", {}).copy(),
-        )
-
-
+    context.create_agent_states(agents)
 
     controller = Controller(
         name="main_controller",
-        context=context,
         agents=agents,
         # show_trace=True,
     )
@@ -443,6 +444,8 @@ def _smoke_test(console: Console):
     )
 
     controller.run(
+        mailbox=deque(),
+        context=context,
         start=ChemTutor,
         artifact=starting_artifact,
         max_step=10,
