@@ -239,15 +239,17 @@ class Controller:
             logger.debug(f"[{self.name}] [{context.step}] [result] {result}")
 
             if result.artifacts:
-                artifact = result.artifacts[0] #TODO: Handle multiple artifacts
+                artifact = result.artifacts[0]
             else:
                 logger.debug(f"Agent {agent.id} did not return any artifacts; keeping previous artifact")
                 artifact = event.artifact
 
-            # Store artifact in global context
-            if isinstance(artifact, EndArtifact):
-                pass
-            context.artifacts[artifact.id] = artifact
+            # Store all artifacts so side-effect artifacts, such as frontend
+            # applet commands, survive even when a text artifact is also emitted.
+            for produced_artifact in result.artifacts or [artifact]:
+                if isinstance(produced_artifact, EndArtifact):
+                    pass
+                context.artifacts[produced_artifact.id] = produced_artifact
 
             logger.debug(f"[{self.name}] [{context.step}] [recommendations] {result.recommendations}")
 
