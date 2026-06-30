@@ -57,9 +57,9 @@ class Controller:
         """
         Build the local context perceived by an agent.
 
-        The initial implementation exposes only:
+        The controller exposes:
 
-        - the global trace of messages (as context.trace.messages)
+        - the global dialog trace (as context.trace.messages)
         - the global artifacts (as context.artifacts)
         - the global state (as context.state)
         - the global control variables (as context.control)
@@ -69,27 +69,7 @@ class Controller:
         """
         logger.debug(f"Global Messages: {context.trace.messages}")
         new_context = deepcopy(context)
-
-        if not new_context.trace.messages:
-            logger.debug(f"Global trace is empty; build system prompt for agent {agent.__class__.__name__} without global messages")
-            if hasattr(agent, "build_system_prompt"):
-                prompt_params = new_context.state.data[agent.__class__.__name__]
-                new_context.trace.messages = agent.build_system_prompt(prompt_params=prompt_params)
-            else:
-                new_context.trace.messages = [{"role": "system", "content": f"Dummy system prompt for {agent.__class__.__name__}"}]
-            return new_context
-
-
-        logger.debug(new_context.trace.messages)
-        # check if context.trace.messages[] has role system
-        old_system_message = new_context.trace.messages[0]
-        assert old_system_message["role"] == "system", "First message in trace is not a system message; agent may not receive expected system prompt"
-
-
-        if hasattr(agent, "build_system_prompt"):
-            prompt_params = new_context.state.data[agent.__class__.__name__]
-            new_context.trace.messages[0] = agent.build_system_prompt(prompt_params=prompt_params)[0]
-
+        logger.debug(f"Agent {agent.__class__.__name__} local dialog trace: {new_context.trace.messages}")
         return new_context
 
     def merge_context(self, global_context: Context, local_context: Context) -> Context:
@@ -218,7 +198,6 @@ class Controller:
 
             # build a selected world view for the agent
             agent_context = self.build_agent_context(agent, context=context)
-            agent_context.create_messages_trace()
             agent_context.check_agents_have_state(self.agents_map.values())
             result, agent_context = agent.run(
                 artifact=event.artifact,
